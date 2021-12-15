@@ -1,13 +1,11 @@
 #include <stdio.h>
-#include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <assert.h>
+#include <stdlib.h>
 #include <stdbool.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "types.h"
 #include "fs.h"
@@ -23,6 +21,7 @@ int i, n;
 char *addr;
 uint bitblocks ;
 uint usedblocks;
+uint totalblocks;
 uint freeblock ;
 struct superblock *sb;
 struct dinode *dip;
@@ -50,9 +49,10 @@ init(char* filename)
   }
   /* read the super block */
   sb = (struct superblock *) (addr + 1 * BLOCK_SIZE);
-  uint bitblocks = sb->size/BPB + 1;
-  uint usedblocks = sb->ninodes / IPB + 3 + bitblocks;
-  uint freeblock = usedblocks;
+  bitblocks = sb->size/BPB + 1;
+  usedblocks = sb->ninodes / IPB + 3 + bitblocks;
+  totalblocks = sb->nblocks + usedblocks;
+  freeblock = usedblocks;
 }
 
 
@@ -68,11 +68,20 @@ valid_inode()
     dip += (i + ROOTINO)%IPB;
     if (dip && dip->type && !(dip->type == T_FILE || dip->type == T_DIR || dip->type == T_DEV)) 
     {
-      fprintf(stderr, "ERROR: bad inode\n");
+      fprintf(stderr, "ERROR: bad inode.\n");
       exit(1);
     }
   }
 }
+
+bool 
+valid_data_block(uint blocknum)
+{
+  if (blocknum >= freeblock && blocknum < totalblocks)
+    return true;
+  return false;
+}
+
 
 /**
  * @brief [2] for each address , all addresses referenced are valid
@@ -80,26 +89,36 @@ valid_inode()
 void 
 valid_inode_blocks()
 {
-  int n = 0;
   for (i = 0; i < sb->ninodes; i++) 
   {
     dip = (struct dinode *) (addr + IBLOCK((uint) (i + ROOTINO))*BLOCK_SIZE);
     dip += (i + ROOTINO)%IPB;
     if (dip && dip->type) 
     {
+      int n = 0;
       for (n = 0; n < NDIRECT; n++) 
       {
-        if (dip->addrs[n] && !(dip->addrs[n] >= addr + freeblock*BLOCK_SIZE && dip->addrs[n] < addr + sb->size))
+        if (dip->addrs[n] && !valid_data_block(dip->addrs[n]))
         {
           fprintf(stderr, "ERROR: bad direct address in inode.\n");
           exit(1);
         }
       }
-
-      if (dip->addrs[n] && !(dip->addrs[n] >= addr + freeblock*BLOCK_SIZE && dip->addrs[n] < addr + sb->size))
-      {
-        fprintf(stderr, "ERROR: bad indirect address in inode.\n");
-        exit(1);
+      if (dip->addrs[NDIRECT]) {
+        if (valid_data_block(dip->addrs[NDIRECT])) {
+          uint* addrs = (uint*) (addr + dip->addrs[NDIRECT] * BLOCK_SIZE);
+          for (n = 0; n < NINDIRECT; n++) 
+          {
+            if (addrs[n] && !valid_data_block(addrs[n]))
+            {
+              fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+              exit(1);
+            }
+          }
+        } else {
+          fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+          exit(1);
+        }
       }
     }
   }
@@ -111,28 +130,28 @@ valid_inode_blocks()
 void 
 valid_root()
 {
-    dip = (struct dinode *) (addr + IBLOCK((uint) ROOTINO)*BLOCK_SIZE);
-    dip += ROOTINO%IPB;
-    if (dip) {
-      if (dip->type == 0 || dip->type != T_DIR)
+  dip = (struct dinode *) (addr + IBLOCK((uint) ROOTINO)*BLOCK_SIZE);
+  dip += ROOTINO%IPB;
+  if (dip) {
+    if (dip->type == 0 || dip->type != T_DIR)
+    {
+      fprintf(stderr, "ERROR: root directory does not exist.\n");
+      exit(1);
+    }
+
+    int n = dip->size/sizeof(struct dirent);
+    de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
+    for (i = 0; i < n; i++,de++){
+      if (strcmp(de->name, "..") == 0 && de->inum != ROOTINO)
       {
         fprintf(stderr, "ERROR: root directory does not exist.\n");
         exit(1);
       }
-
-      int n = dip->size/sizeof(struct dirent);
-      de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-      for (i = 0; i < n; i++,de++){
-        if (strcmp(de->name, "..") == 0 && de->inum != ROOTINO)
-        {
-          fprintf(stderr, "ERROR: root directory does not exist.\n");
-          exit(1);
-        }
-      }
-    } else {
-      fprintf(stderr, "ERROR: root directory does not exist.\n");
-      exit(1);
     }
+  } else {
+    fprintf(stderr, "ERROR: root directory does not exist.\n");
+    exit(1);
+  }
 }
 
 /**
@@ -153,17 +172,17 @@ valid_directory()
         de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
         int j, flag = 0;
         for (j = 0; j < n; j++,de++){
-          if (strcmp(de->name, ".") == 0 && de->inum != j + ROOTINO)
+          if (strcmp(de->name, ".") == 0 && de->inum != i + ROOTINO)
           {
             fprintf(stderr, "ERROR: directory not properly formatted.\n");
             exit(1);
           }
           if (strcmp(de->name, "..") == 0) 
-            flag = 1;
+            flag++;
         }
-        if (!flag) {
-            fprintf(stderr, "ERROR: directory not properly formatted.\n");
-            exit(1);
+        if (flag != 1) {
+          fprintf(stderr, "ERROR: directory not properly formatted.\n");
+          exit(1);
         }
       }
     }
@@ -173,7 +192,7 @@ valid_directory()
 void 
 valid_bit(uint blocknum) 
 {
-  uchar* buf = (uchar*) BBLOCK(blocknum, sb->ninodes);
+  uchar* buf = (uchar*) (addr + BBLOCK(blocknum, sb->ninodes));
   uint offset = blocknum % BPB;
   if (!(buf[offset/8] & (0x1 << (offset % 8))))
   {
@@ -185,7 +204,7 @@ valid_bit(uint blocknum)
 void 
 valid_inode_bitblocks() 
 {
-  uint blocknum, blockaddr;
+  uint blocknum;
   for (i = 0; i < sb->ninodes; i++) 
   {
     dip = (struct dinode *) (addr + IBLOCK((uint) (i + ROOTINO))*BLOCK_SIZE);
@@ -193,34 +212,16 @@ valid_inode_bitblocks()
     if (dip && dip->type) 
     {
       int n;
-      for (n = 0; n < NDIRECT; n++) 
+      for (n = 0; n < NDIRECT + 1; n++) 
       {
-        if (blockaddr = dip->addrs[n])
-        {
-          uchar* buf = (uchar*) BBLOCK(blockaddr, sb->ninodes);
-          if (buf[dip->addrs[n]%BPB] & (0x1 << (dip->addrs[n]%BPB)))
-            continue;
-          else {
-            fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
-            exit(1);
-          }
-        }
+        if ((blocknum = dip->addrs[n]) != 0)
+          valid_bit(blocknum);
       }
-
-      if (dip->addrs[n])
-      {
-          uchar* buf = (uchar*) BBLOCK(dip->addrs[n], sb->ninodes);
-          if (buf[dip->addrs[n]%BPB] & (0x1 << (dip->addrs[n]%BPB)))
-            continue;
-          else {
-            fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
-            exit(1);
-          }
-      }
+    }
   }
 }
 
-int
+  int
 main(int argc, char *argv[])
 {
   if(argc < 2){
