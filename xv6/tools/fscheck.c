@@ -221,6 +221,71 @@ valid_inode_bitblocks()
   }
 }
 
+//fill the used direct address
+void store_dir_indir_address(struct dinode *inode,uint *diraddrscount,uint *indaddrscount){
+  int i;
+  uint blockaddress;
+  uint *indirect;
+  uint ninodeblocks = (sb->ninodes/(IPB)) + 1;
+  uint nbitmapblocks = (sb->size/(BPB)) + 1;
+  uint firstdatablockValue = ninodeblocks + nbitmapblocks;
+  for(i=0;i<NDIRECT;i++){
+    blockaddress = inode->addrs[i];
+    if(blockaddress == 0){
+      continue;
+    }
+    diraddrscount[blockaddress - firstdatablockValue]++;
+  }
+
+  blockaddress = inode->addrs[NDIRECT];
+  indirect = (uint*)(addr + blockaddress*BLOCK_SIZE);
+  blockaddress = inode->addrs[NDIRECT];
+  for(i=0; i < NINDIRECT;i++,indirect++){
+    blockaddress = *(indirect);
+    if(blockaddress==0){
+      continue;
+    }
+    indaddrscount[blockaddress - firstdatablockValue]++;
+  }
+}
+
+
+void valid_addres_use(){
+  int i;
+
+  //storing used address count
+  uint diraddrscount[sb->nblocks];
+  memset(diraddrscount,0,sizeof(uint)* sb->nblocks);
+
+  //storing used indirect count
+  uint indaddrscount[sb->nblocks];
+  memset(indaddrscount,0,sizeof(uint)* sb->nblocks);
+
+  dip = (struct dinode*)(char *)(addr + 2*BLOCK_SIZE);
+  
+  for(i=0;i<sb->ninodes;i++,dip++){
+    if(dip->type == 0)
+      continue;
+
+    store_dir_indir_address(dip,diraddrscount,indaddrscount);
+
+  }
+  for(i=0;i<sb->nblocks;i++){
+    if(diraddrscount[i]>1){
+      fprintf(stderr, "ERROR: direct address used more than once.\n");
+      exit(1);
+    }
+    if(indaddrscount[i]>1){
+      fprintf(stderr, "ERROR: indirect address used more than once.\n" );
+      exit(1);
+    }
+  }
+}
+
+
+
+
+
   int
 main(int argc, char *argv[])
 {
@@ -234,6 +299,7 @@ main(int argc, char *argv[])
   valid_inode_blocks();
   valid_root();
   valid_directory();
+  valid_addres_use();
   exit(0);
 
 }
