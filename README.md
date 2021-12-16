@@ -21,6 +21,5 @@ gcc -Wall -Werror fcheck.c -o fcheck
 | 9     | For all inodes marked in use, each must be referred to in at least one directory | ERROR: inode marked use but not found in a directory.                        |
 | 10    | For each inode number that is referred to in a valid directory, it is actually marked in use                                                        | ERROR: inode referred to in directory
 but marked free.                       |
-| 11    | Reference counts (number of links) for regular files match the number of times file is referred to in directories (i.e., hard links work correctly) | ERROR: bad reference count for file.
-|
+| 11    | Reference counts (number of links) for regular files match the number of times file is referred to in directories (i.e., hard links work correctly) | ERROR: bad reference count for file.  |
 | 12    | No extra links allowed for directories (each directory only appears in one other directory)                                                         | ERROR: directory appears more than once in file system.                      |
