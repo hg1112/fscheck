@@ -37,14 +37,14 @@ init(char* image)
   // open fd for given image file
   int fsfd = open(image, O_RDONLY);
   if(fsfd < 0){
-    perror(image);
+    fprintf(stderr, "image not found.\n");
     exit(1);
   }
 
   // read stats of the image file
   struct stat buf;
   if (fstat(fsfd, &buf) != 0) {
-    perror("fstat failed");
+    fprintf(stderr, "fstat failed.\n");
     exit(1);
   }
 
@@ -555,7 +555,7 @@ main(int argc, char *argv[])
 {
   // check arguments
   if(argc < 2){
-    fprintf(stderr, "image not found.\n");
+    fprintf(stderr, "Usage: fcheck <file_system_image>\n");
     exit(1);
   }
   
