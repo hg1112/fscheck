@@ -288,7 +288,7 @@ valid_bitmap_mark()
     // marked in bitmap but used nowhere in inodes
     if (marked[i] && !inuse[i])
     {
-      fprintf(stderr, "ERROR: bitmap marks block in use but it is not inuse.\n");
+      fprintf(stderr, "ERROR: bitmap marks block in use but it is not in use.\n");
       exit(1);
     }
   }
