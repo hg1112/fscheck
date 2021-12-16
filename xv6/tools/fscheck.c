@@ -17,6 +17,10 @@
 #define T_DEV      3   // Special device
 #define DIRENTPB   (BSIZE / sizeof(struct dirent))
 
+
+char bitarr[8] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 };
+#define BITSET(bitmapblocks, blockaddr) ((*(bitmapblocks + blockaddr / 8)) & (bitarr[blockaddr % 8]))
+
 int i, n;
 char *addr;
 uint bitblocks ;
@@ -223,18 +227,14 @@ valid_inode_bitblocks()
 
 //fill the used direct address
 void store_dir_indir_address(struct dinode *inode,uint *diraddrscount,uint *indaddrscount){
-  int i;
   uint blockaddress;
   uint *indirect;
-  uint ninodeblocks = (sb->ninodes/(IPB)) + 1;
-  uint nbitmapblocks = (sb->size/(BPB)) + 1;
-  uint firstdatablockValue = ninodeblocks + nbitmapblocks;
   for(i=0;i<NDIRECT;i++){
     blockaddress = inode->addrs[i];
     if(blockaddress == 0){
       continue;
     }
-    diraddrscount[blockaddress - firstdatablockValue]++;
+    diraddrscount[blockaddress - freeblock]++;
   }
 
   blockaddress = inode->addrs[NDIRECT];
@@ -245,7 +245,7 @@ void store_dir_indir_address(struct dinode *inode,uint *diraddrscount,uint *inda
     if(blockaddress==0){
       continue;
     }
-    indaddrscount[blockaddress - firstdatablockValue]++;
+    indaddrscount[blockaddress - freeblock]++;
   }
 }
 
@@ -261,8 +261,10 @@ void valid_addres_use(){
   uint indaddrscount[sb->nblocks];
   memset(indaddrscount,0,sizeof(uint)* sb->nblocks);
 
-  dip = (struct dinode*)(char *)(addr + 2*BLOCK_SIZE);
-  
+  dip = (struct dinode*)(char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+  //inode = (struct dinode*)(image->inodeblocks);
+  //(char *)(mmapimage+2*BLOCK_SIZE);
+
   for(i=0;i<sb->ninodes;i++,dip++){
     if(dip->type == 0)
       continue;
@@ -282,6 +284,238 @@ void valid_addres_use(){
   }
 }
 
+void get_used_dbs(struct dinode *inode, int *used_dbs){
+  int j;
+  uint blockaddress;
+  uint *indirect;
+  uint numinodeblocks=(sb->ninodes/(IPB))+1;
+  uint ninodeblocks = (sb->ninodes/(IPB)) + 1;
+  uint nbitmapblocks = (sb->size/(BPB)) + 1;
+  uint countInodeBlocks = ((sb->ninodes/IPB) + 1);
+  uint countBitmapBlocks = ((sb->size/BPB) + 1);
+  uint dBlockStart = countBitmapBlocks + countInodeBlocks + 2;
+  uint firstdatablockValue = ninodeblocks + nbitmapblocks;
+
+
+  for(i=0; i<(NDIRECT+1);i++){
+    blockaddress = inode->addrs[i];
+    if(blockaddress == 0){
+      continue;
+    }
+
+     // printf("%s %d \n","test=",i );
+    used_dbs[blockaddress - dBlockStart]=1;
+
+  //   blockaddress = inode->addrs[NDIRECT];
+  // indirect = (uint*)(addr + blockaddress*BLOCK_SIZE);
+  // blockaddress = inode->addrs[NDIRECT];
+  // for(i=0; i < NINDIRECT;i++,indirect++){
+  //   blockaddress = *(indirect);
+  //   if(blockaddress==0){
+  //     continue;
+  //   }
+  //   indaddrscount[blockaddress - freeblock]++;
+  // }
+
+    if(i==NDIRECT){
+      printf("%s %d \n","test=",i );
+      indirect = (uint *)(addr + blockaddress*BLOCK_SIZE);
+      blockaddress = inode->addrs[NDIRECT];
+      for(j=0;j<NINDIRECT;j++,indirect++){
+        blockaddress = *(indirect);
+        if(blockaddress == 0){
+          continue;
+        }
+        used_dbs[blockaddress - dBlockStart]=1;
+      }
+    }
+  }
+}
+
+
+
+void valid_bitmap(){
+  int used_dbs[sb->nblocks];
+  uint blockaddress;
+  memset(used_dbs,0,sb->nblocks*sizeof(int));
+  printf("%s \n","test2" );
+  dip = (struct dinode*)(char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+  char *inodeblocks = (char *)(addr + 2*BLOCK_SIZE);
+  char *bitmapblocks = (char *)(inodeblocks + bitblocks*BLOCK_SIZE);
+
+  printf("%s \n","test3" );
+
+  for(i=0;i<sb->ninodes;i++,dip++){
+    if(dip->type == 0){
+      continue;
+    }
+    // printf("%s %d \n","test=",i );
+
+    get_used_dbs(dip,used_dbs);
+  }
+  printf("%s \n","test" );
+  for(i=0;i<sb->nblocks;i++){
+    blockaddress = (uint)(i+freeblock);
+    if(used_dbs[i]==0 && BITSET(bitmapblocks,blockaddress)){
+      fprintf(stderr, "ERROR: bitmap marks block in use but it is not in use.\n");
+      exit(1);
+    }
+  }
+
+
+}
+
+void search_directory(struct dinode *rootinode, int *inodemap){
+    int i, j;
+    uint blockaddress;
+    uint *indirect;
+    struct dinode *inode;
+    struct dirent *dir;
+    char *inodeblocks = (char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+    //(struct dinode*)(char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+    //(char *)(mmapimage+2*BLOCK_SIZE);
+    
+    if(rootinode->type==T_DIR){
+        for(i=0; i<NDIRECT; i++) {
+            blockaddress=rootinode->addrs[i];
+            if(blockaddress==0){
+                continue;
+            }
+
+            dir=(struct dirent *)(addr+blockaddress*BLOCK_SIZE);
+            for(j=0; j<DPB; j++, dir++) {
+                if(dir->inum!=0 && strcmp(dir->name, ".")!=0 && strcmp(dir->name, "..")!=0){
+                    inode=((struct dinode *)(inodeblocks))+dir->inum;
+                    inodemap[dir->inum]++;
+                    search_directory(inode, inodemap);
+                }
+            }
+        }
+
+        //traverse indirect address
+        blockaddress=rootinode->addrs[NDIRECT];
+        if(blockaddress!=0){
+            indirect=(uint *)(addr+blockaddress*BLOCK_SIZE);
+            for(i=0; i<NINDIRECT; i++, indirect++){
+                blockaddress=*(indirect);
+                if(blockaddress==0){
+                    continue;
+                }
+
+                dir=(struct dirent *)(addr+blockaddress*BLOCK_SIZE);
+
+                for(j=0; j<DPB; j++, dir++){
+                    if(dir->inum!=0 && strcmp(dir->name, ".")!=0 && strcmp(dir->name, "..")!=0){
+                        inode=((struct dinode *)(inodeblocks))+dir->inum;
+                        inodemap[dir->inum]++;
+                        search_directory(inode, inodemap);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void valid_directory_2()
+{
+  int i;
+  int inodearr[sb->ninodes];
+  memset(inodearr,0,sizeof(int)* sb->ninodes);
+  struct dinode  *rootinode;
+
+  
+  dip = (struct dinode*)(char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+  
+  rootinode = ++dip;
+  inodearr[0]++;
+  inodearr[1]++;
+
+  search_directory(rootinode,inodearr);
+
+  dip++;
+
+  for(i=2;i<sb->ninodes;i++,dip++){
+    //rule 9
+        if(dip->type!=0 && inodearr[i]==0){
+            fprintf(stderr,"ERROR: inode marked use but not found in a directory.\n");
+            exit(1);
+        }
+
+        //rule 10
+        if(inodearr[i]>0 && dip->type==0){
+            fprintf(stderr,"ERROR: inode referred to in directory but marked free.\n");
+            exit(1);
+        }
+
+        //rule 11
+        //reference count check for all files.
+        if(dip->type==T_FILE && dip->nlink!=inodearr[i]){
+            fprintf(stderr,"ERROR: bad reference count for file.\n");
+            exit(1);
+        }
+    
+        //rule 12
+        if(dip->type==T_DIR && inodearr[i]>1){
+            fprintf(stderr,"ERROR: directory appears more than once in file system.\n");
+            exit(1);
+          }
+  }
+
+}
+
+void check_bitmap_addr(){
+
+dip = (struct dinode*)(char *)(addr + IBLOCK(ROOTINO)*BLOCK_SIZE);
+int j,k;
+char *inodeblocks=(char *)(addr+2*BLOCK_SIZE);
+uint numinodeblocks=(sb->ninodes/(IPB))+1;
+char *bitmapblocks=(char *)(inodeblocks +numinodeblocks*BLOCK_SIZE);
+//char *bitmapblocks = (char *)(inodeblocks + bitblocks*BLOCK_SIZE);
+
+  for (i = 0; i < sb->ninodes; i++,dip++) 
+  {
+    if(dip->type==0){
+      continue;
+    }
+    
+    
+
+    
+    uint blockaddr;
+    uint *indirect;
+    
+    for(j=0; j<(NDIRECT+1); j++){
+        blockaddr=dip->addrs[j];
+        if(blockaddr==0){
+            continue;
+        }
+        
+        if(!BITSET(bitmapblocks, blockaddr)){
+            fprintf(stderr,"ERROR: address used by inode but marked free in bitmap.\n");
+            exit(1);
+        }
+        
+        //for indirect address.
+        if(j==NDIRECT){
+            indirect=(uint *)(addr+blockaddr*BLOCK_SIZE);
+            for(k=0; k<NINDIRECT; k++, indirect++){
+                blockaddr=*(indirect);
+                if(blockaddr==0){
+                    continue;
+                }
+                
+                if(!BITSET(bitmapblocks, blockaddr)){
+                    fprintf(stderr,"ERROR: address used by inode but marked free in bitmap.\n");
+                    exit(1);
+                }
+            }
+        }
+      }
+    }
+}
+
+
+
 
 
 
@@ -294,12 +528,15 @@ main(int argc, char *argv[])
     exit(1);
   }
 
+
   init(argv[1]);
   valid_inode();
   valid_inode_blocks();
   valid_root();
   valid_directory();
+  check_bitmap_addr();
   valid_addres_use();
+  valid_directory_2();
   exit(0);
 
 }
