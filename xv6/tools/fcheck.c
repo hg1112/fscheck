@@ -11,11 +11,12 @@
 #include <sys/stat.h>
 
 #define BLOCK_SIZE (BSIZE)
-#define BYTEBITS   8
+#define BYTE   8
 #define T_DIR      1   // Directory
 #define T_FILE     2   // File
 #define T_DEV      3   // Special device
 #define DIRENTPB   (BSIZE / sizeof(struct dirent))
+#define BIT(addr, blocknum, ninodes) ((*(addr + (BBLOCK(blocknum,ninodes) * BLOCK_SIZE) + blocknum / BYTE)) & (0x1 << (blocknum % BYTE)))
 
 int i, j, n, flag;
 char *addr;
@@ -137,13 +138,14 @@ valid_root()
       exit(1);
     }
 
-    n = dip->size/sizeof(struct dirent);
     de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-    for (i = 0; i < n; i++,de++){
-      if (strcmp(de->name, "..") == 0 && de->inum != ROOTINO)
-      {
-        fprintf(stderr, "ERROR: root directory does not exist.\n");
-        exit(1);
+    for (i = 0; i < DIRENTPB; i++,de++){
+      if (de) {
+        if (strcmp(de->name, "..") == 0 && de->inum != ROOTINO)
+        {
+          fprintf(stderr, "ERROR: root directory does not exist.\n");
+          exit(1);
+        }
       }
     }
   } else {
@@ -162,9 +164,8 @@ valid_directory()
   {
     if (dip && dip->type && dip->type == T_DIR) 
     {
-      n = dip->size/sizeof(struct dirent);
       de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-      for (j = 0, flag = 0; j < n; j++,de++){
+      for (j = 0, flag = 0; j < DIRENTPB; j++,de++){
         if (strcmp(de->name, ".") == 0 && ++flag && de->inum != i)
         {
           fprintf(stderr, "ERROR: directory not properly formatted.\n" );
@@ -188,9 +189,7 @@ valid_bitmap_mark()
   bool* inuse = (bool*) malloc(sizeof(bool) * sb->nblocks);
   for (i = freeblock; i < totalblocks; i++) 
   {
-    uchar* buf = (uchar*) (addr + BBLOCK(i, sb->ninodes));
-    uint offset = i % BPB;
-    if (buf[offset/8] & (0x1 << (offset % 8)))
+    if (BIT(addr, i, sb->ninodes))
       marked[i - freeblock] = true;
   }
   for (i = ROOTINO, dip = inode(i); i < sb->ninodes; i++, dip++) 
@@ -277,31 +276,54 @@ valid_indirect_address()
 void 
 valid_inode_mark()
 {
-  uint* count = (uint*) malloc(sizeof(uint) * sb->ninodes);
+  bool* mark = (bool*) malloc(sizeof(uint) * sb->ninodes);
   bool* inuse = (bool*) malloc(sizeof(bool) * sb->ninodes);
+  inuse[ROOTINO] = true;
   for (i = ROOTINO, dip = inode(i); i < sb->ninodes; i++, dip++) 
   {
-    inuse[i] = false;
     if (dip && dip->type) 
     {
-      inuse[i] = true;
+      mark[i] = true;
       if (dip->type == T_DIR) {
-        n = dip->size/sizeof(struct dirent);
-        de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-        for (j = 0; j < n; j++,de++){
-          count[de->inum]++;
+        for (n = 0; n < NDIRECT; n++) 
+        {
+          if ((blocknum = dip->addrs[n]) != 0)
+          {
+            de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+            for (j = 0; j < DIRENTPB; j++,de++){
+              if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+                continue;
+              inuse[de->inum] = true;
+            }
+          }
+        }
+        if ((blocknum = dip->addrs[NDIRECT]) != 0) 
+        {
+          uint* addrs = (uint*) (addr + blocknum * BLOCK_SIZE);
+          for (n = 0; n < NINDIRECT; n++) 
+          {
+            if ((blocknum = addrs[n]) != 0)
+            {
+              de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+              for (j = 0; j < DIRENTPB; j++,de++){
+                if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+                  continue;
+                inuse[de->inum] = true;
+              }
+            }
+          }
         }
       }
     }
   }
   for (i = ROOTINO; i < sb->ninodes; i++)
   {
-    if (inuse[i] && count[i] == 0) {
-      fprintf(stderr, "ERROR: inode marked use but not found in directory.\n");
+    if (inuse[i] && !mark[i]) {
+      fprintf(stderr, "ERROR: inode referred to in directory but marked free.\n");
       exit(1);
     }
-    if (!inuse[i] && count[i] > 0) {
-      fprintf(stderr, "ERROR: inode referred to in directory but marked free.\n");
+    if (!inuse[i] && mark[i]) {
+      fprintf(stderr, "ERROR: inode marked use but not found in directory.\n");
       exit(1);
     }
   }
@@ -320,10 +342,33 @@ valid_ref_count()
         link[i] += dip->nlink;
       if (dip->type == T_DIR) 
       {
-        n = dip->size/sizeof(struct dirent);
-        de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-        for (j = 0; j < n; j++,de++) {
-          ref[de->inum]++;
+        for (n = 0; n < NDIRECT; n++) 
+        {
+          if ((blocknum = dip->addrs[n]) != 0)
+          {
+            de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+            for (j = 0; j < DIRENTPB; j++,de++){
+              if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+                continue;
+              ref[de->inum]++;
+            }
+          }
+        }
+        if ((blocknum = dip->addrs[NDIRECT]) != 0) 
+        {
+          uint* addrs = (uint*) (addr + blocknum * BLOCK_SIZE);
+          for (n = 0; n < NINDIRECT; n++) 
+          {
+            if ((blocknum = addrs[n]) != 0)
+            {
+              de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+              for (j = 0; j < DIRENTPB; j++,de++){
+                if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+                  continue;
+                ref[de->inum]++;
+              }
+            }
+          }
         }
       }
     }
@@ -353,21 +398,50 @@ valid_dir_links()
   {
     if (dip && dip->type && dip->type == T_DIR) 
     {
-        n = dip->size/sizeof(struct dirent);
-        de = (struct dirent *) (addr + (dip->addrs[0])*BLOCK_SIZE);
-        for (j = 0; j < n; j++,de++){
-          if (isdir[de->inum]) {
-            count[de->inum]++;
-            if (count[de->inum] != 1) 
-            {
-              fprintf(stderr, "ERROR: directory appears more than once in filesystem.\n");
-              exit(1);
+      for (n = 0; n < NDIRECT; n++) 
+      {
+        if ((blocknum = dip->addrs[n]) != 0)
+        {
+          de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+          for (j = 0; j < DIRENTPB; j++,de++){
+            if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+              continue;
+            if (isdir[de->inum]) {
+              count[de->inum]++;
+              if (count[de->inum] != 1) 
+              {
+                fprintf(stderr, "ERROR: directory appears more than once in filesystem.\n");
+                exit(1);
+              }
             }
           }
         }
+      }
+      if ((blocknum = dip->addrs[NDIRECT]) != 0) 
+      {
+        uint* addrs = (uint*) (addr + blocknum * BLOCK_SIZE);
+        for (n = 0; n < NINDIRECT; n++) 
+        {
+          if ((blocknum = addrs[n]) != 0)
+          {
+            de = (struct dirent *) (addr + blocknum*BLOCK_SIZE);
+            for (j = 0; j < DIRENTPB; j++,de++) {
+              if (!de || strcmp(".", de->name) == 0 || strcmp("..", de->name) == 0)
+                continue;
+              if (isdir[de->inum]) {
+                count[de->inum]++;
+                if (count[de->inum] != 1) 
+                {
+                  fprintf(stderr, "ERROR: directory appears more than once in filesystem.\n");
+                  exit(1);
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
-
 }
   int
 main(int argc, char *argv[])
